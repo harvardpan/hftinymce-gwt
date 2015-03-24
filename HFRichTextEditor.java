@@ -33,6 +33,9 @@ public class HFRichTextEditor extends TextArea {
 
     public static final int TINYMCE_VERSION_3 = 3;
     public static final int TINYMCE_VERSION_4 = 4;
+
+    public static final int DEFAULT_HEIGHT = 72;
+    public static final int DEFAULT_WIDTH = 640;
     
     public static int libraryVersion = TINYMCE_VERSION_4; // select which version of the library to load at runtime.
     
@@ -267,7 +270,6 @@ public class HFRichTextEditor extends TextArea {
             // No such version allowed.
             return false;
         }
-        // Below ScripInjector code not currently used because we are inheriting the module
         JavaScriptObject scriptInstance = ScriptInjector.fromUrl(scriptUrl)
             .setWindow(ScriptInjector.TOP_WINDOW)
             .setCallback(new Callback<Void, Exception>() {
@@ -293,7 +295,31 @@ public class HFRichTextEditor extends TextArea {
     }
     
     public static void initCallback(String elementId) {
-        // Add actions here to take after the editor has been properly initialized
+        // Add actions here to take after the editor has been properly initialized. Usually, calls are made to the widget
+        // such as setSize, setTabIndex - before the editor is initialized. We make those calls here to ensure that they
+        // get set properly.
+        
+        final String elementIdFinal = elementId; 
+        Scheduler.get().scheduleDeferred(new ScheduledCommand() {
+            @Override
+            public void execute() {
+                HFRichTextEditor editorInstance = getActiveEditor(elementIdFinal);
+                if (editorInstance != null) {
+                    editorInstance.setControlTabIndex(elementIdFinal); // set up the tabIndex that comes from the hidden textarea (if it exists)
+                }
+                
+                JSONValue pxWidth = editorInstance.getOptions().get("width");
+                if (pxWidth == null) {
+                    pxWidth = new JSONNumber(DEFAULT_WIDTH);
+                }
+                JSONValue pxHeight = editorInstance.getOptions().get("height");
+                if (pxHeight == null) {
+                    pxHeight = new JSONNumber(DEFAULT_HEIGHT);
+                }
+                editorInstance.setControlSize(elementIdFinal, pxWidth, pxHeight);
+            }
+        });        
+        
     }
 
     /**
@@ -332,6 +358,19 @@ public class HFRichTextEditor extends TextArea {
                     });
                     e.on('keydown', function(ev) {
                         @com.healthfortis.map.shared.client.ui.HFRichTextEditor::handleNativeEvent(Ljava/lang/String;Ljava/lang/Object;)(e.id, ev);
+                        // Prevent Ctrl+S from propagating to the TinyMCE editor. We don't want to save to external files.
+                        if (ev.ctrlKey || ev.metaKey) {
+                            switch (String.fromCharCode(ev.which || ev.keyCode).toLowerCase()) {
+                            case 's':
+                                ev.preventDefault();
+                                if (ev.stopPropagation) {
+                                    ev.stopPropagation();
+                                } else {
+                                    ev.cancelBubble = true;
+                                }
+                                break;
+                            }
+                        }
                     });
                     e.on('keypress', function(ev) {
                         @com.healthfortis.map.shared.client.ui.HFRichTextEditor::handleNativeEvent(Ljava/lang/String;Ljava/lang/Object;)(e.id, ev);
@@ -511,6 +550,17 @@ public class HFRichTextEditor extends TextArea {
         setHeight(height);
     }
     
+    private native void setControlSize(String elementId, JSONValue pxWidth, JSONValue pxHeight) 
+    /*-{
+        var myEditor = $wnd.tinymce.get(elementId);
+        if (myEditor != null) {
+            // Try multiple methods to set the size. Can't seem to get the size to stick in Chrome and Firefox
+            myEditor.dom.setStyle(elementId + '_ifr', 'height', pxHeight + 'px');
+            myEditor.dom.setStyle(elementId + '_ifr', 'width', pxWidth + 'px');            
+            myEditor.theme.resizeTo(pxWidth, pxHeight);
+        }
+    }-*/;
+    
     @Override
     public void setWidth(String width) {
         super.setWidth(width);
@@ -518,22 +568,17 @@ public class HFRichTextEditor extends TextArea {
             JSONValue pxWidth = parseSizeDimension(width);
             addOption("width", pxWidth);
             if (libraryLoaded && initialized) {
-                // If something is initialized, we have to set the active editor.
-                setControlWidth(elementId, pxWidth);
+                JSONValue pxHeight = options.get("height");
+                if (pxHeight == null) {
+                    pxHeight = new JSONNumber(DEFAULT_HEIGHT);
+                }
+                setControlSize(elementId, pxWidth, pxHeight);
             }
         } catch (JavaScriptException e) {
             // Don't do anything, just allow it to return.
             GWT.log("Unable to set the width on the TinyMCE editor.", e);
         }
     }
-    
-    private native void setControlWidth(String elementId, JSONValue pxWidth) 
-    /*-{
-        var myEditor = $wnd.tinymce.get(elementId);
-        if (myEditor != null) {
-            myEditor.getContainer().width(pxWidth);
-        }
-    }-*/;
     
     @Override
     public void setHeight(String height) {
@@ -542,22 +587,17 @@ public class HFRichTextEditor extends TextArea {
             JSONValue pxHeight = parseSizeDimension(height);
             addOption("height", pxHeight);
             if (libraryLoaded && initialized) {
-                // If something is initialized, we have to set the active editor.
-                setControlHeight(elementId, pxHeight);
+                JSONValue pxWidth = options.get("width");
+                if (pxWidth == null) {
+                    pxWidth = new JSONNumber(DEFAULT_WIDTH);
+                }
+                setControlSize(elementId, pxWidth, pxHeight);
             }
         } catch (JavaScriptException e) {
             // Don't do anything, just allow it to return.
             GWT.log("Unable to set the height on the TinyMCE editor.", e);
         }
-    }
-    
-    private native void setControlHeight(String elementId, JSONValue pxHeight) 
-    /*-{
-        var myEditor = $wnd.tinymce.get(elementId);
-        if (myEditor != null) {
-            myEditor.getContainer().height(pxHeight);
-        }
-    }-*/;    
+    }   
         
     /*
      * Returns whether the current object is the one that has the focus.
@@ -586,4 +626,52 @@ public class HFRichTextEditor extends TextArea {
             myEditor.focus();
         }
     }-*/;
+    
+    public void setTabIndex(int tabIndex) {
+        super.setTabIndex(tabIndex); // sets the tabIndex for the hidden associated textarea
+
+        if (!libraryLoaded || !initialized) {
+            // If not loaded or initialized, we're done.
+            return;
+        }
+        
+        try {
+            // This will move the value in the textArea to the iframe
+            setControlTabIndex(elementId);
+        } catch (JavaScriptException e) {
+            GWT.log("Unable to set the tab index on the TinyMCE editor iframe.", e);
+        }    
+    }
+
+    /**
+     * This will move the tabIndex from the textArea to the iframe.
+     * 
+     * @param elementId the elementId to uniquely identify the textarea
+     */
+    private native void setControlTabIndex(String elementId)
+    /*-{
+        var myEditor = $wnd.tinymce.get(elementId);
+        if (myEditor != null) {
+            var textAreaElement = null;
+            if ($doc.getElementById) {
+                textAreaElement = $doc.getElementById(elementId); // element replaced by TinyMCE
+            }
+            if (textAreaElement == null) {
+                return;
+            }
+            var originalTabIndex = 0; // tabindex of element, or 0            
+            if (textAreaElement.getAttribute && textAreaElement.getAttribute('tabindex')) {
+                originalTabIndex = textAreaElement.getAttribute('tabindex');
+            }
+            var iframeTextEditor = $doc.getElementById(elementId + '_ifr'); // editor iframe element
+            if (iframeTextEditor == null || !iframeTextEditor.setAttribute) {
+                return;
+            }
+            iframeTextEditor.setAttribute('tabindex', originalTabIndex); // set iframe tabindex            
+        }
+    }-*/;
+
+    public JSONObject getOptions() {
+        return options;
+    }    
 }

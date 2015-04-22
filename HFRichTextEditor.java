@@ -1,8 +1,8 @@
 package com.healthfortis.map.shared.client.ui;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.Map;
 import java.util.Set;
 
@@ -37,6 +37,12 @@ public class HFRichTextEditor extends TextArea {
     public static final int DEFAULT_HEIGHT = 72;
     public static final int DEFAULT_WIDTH = 640;
     
+    public static final int PENDING_COMMAND_UNLOAD = 0;
+    public static final int PENDING_COMMAND_LOAD = 1;
+    public static final int PENDING_COMMAND_SELECT_ALL = 2;
+    public static final int PENDING_COMMAND_SET_HTML = 3;
+    public static final int PENDING_COMMAND_SET_FOCUS = 4;
+    
     public static int libraryVersion = TINYMCE_VERSION_4; // select which version of the library to load at runtime.
     
     private static boolean libraryLoaded = false;
@@ -45,14 +51,16 @@ public class HFRichTextEditor extends TextArea {
     static {
         activeEditors = new HashMap<String, HFRichTextEditor>();
     }
-    private LinkedList<Integer> initializationStack = new LinkedList<Integer>(); // handle multiple onLoad and unUnload events in succession
+    private ArrayList<Integer> pendingCommands = new ArrayList<Integer>(); // handle multiple onLoad and unUnload events in succession
     
     @SuppressWarnings("rawtypes")
     private Set fixedOptions = new HashSet(2); // options that can not be overwritten
     private JSONObject options = new JSONObject(); // all other TinyMCE options
     private boolean initialized = false;
+    private boolean initializing = false;
     private String elementId;
     private boolean focused;
+    private SafeHtml pendingSetHtmlText = null;
     
     public HFRichTextEditor() {
         this(DEFAULT_ELEMENT_ID);
@@ -177,17 +185,64 @@ public class HFRichTextEditor extends TextArea {
         }
     }
 
+    private void addPendingLoad() {
+        if (!pendingCommands.isEmpty()
+                && pendingCommands.contains(PENDING_COMMAND_UNLOAD)) {
+            // A load and unload paired together is a no-op
+            pendingCommands.remove(Integer.valueOf(PENDING_COMMAND_UNLOAD));
+            return;
+        }
+        
+        if (!pendingCommands.contains(PENDING_COMMAND_LOAD)) {
+            pendingCommands.add(PENDING_COMMAND_LOAD);
+        }
+    }
+    
+    private void addPendingUnload() {
+        if (!pendingCommands.isEmpty()
+                && pendingCommands.contains(PENDING_COMMAND_LOAD)) {
+            // A load and unload paired together is a no-op
+            pendingCommands.remove(Integer.valueOf(PENDING_COMMAND_LOAD));
+            return;
+        }
+        
+        if (!pendingCommands.contains(PENDING_COMMAND_UNLOAD)) {
+            pendingCommands.add(PENDING_COMMAND_UNLOAD);
+        }
+    }
+
+    private void addPendingSelectAll() {
+        if (!pendingCommands.contains(PENDING_COMMAND_SELECT_ALL)) {
+            pendingCommands.add(PENDING_COMMAND_SELECT_ALL);
+        }
+    }
+
+    private void addPendingSetHtml() {
+        if (!pendingCommands.contains(PENDING_COMMAND_SET_HTML)) {
+            pendingCommands.add(PENDING_COMMAND_SET_HTML);
+        }
+    }
+
+    private void addPendingSetFocus() {
+        if (!pendingCommands.contains(PENDING_COMMAND_SET_FOCUS)) {
+            pendingCommands.add(PENDING_COMMAND_SET_FOCUS);
+        }
+    }
+    
     @Override
     protected void onLoad()
     {
         super.onLoad();
         // Delay the initialization of the TinyMCE editor until after the current browser loop.
         // This will avoid issues where there are multiple loads and unloads.
-        initializationStack.addFirst(1);
+        if (!isVisible()) {
+            return;
+        }
+        addPendingLoad();
         Scheduler.get().scheduleDeferred(new ScheduledCommand() {
             @Override
             public void execute() {
-                initialize();
+                runPendingCommand();
             }
         });        
     }
@@ -195,39 +250,81 @@ public class HFRichTextEditor extends TextArea {
     @Override
     protected void onUnload() {
         try {
-            unloadTinyMce(elementId);            
-            initialized = false;
-            if (!initializationStack.isEmpty()) {
-                initializationStack.remove();
+            if (!uninitialize()) {
+                addPendingUnload();
             }
-            // Clear the entry in activeEditors so that we don't hold the memory if it needs to be cleaned up.
-            activeEditors.put(elementId, null);
         } catch (JavaScriptException e) {
             GWT.log("Unable to clean up TinyMCE editor.", e);
+        } finally {
+            super.onUnload();
         }
-        super.onUnload();
     }
     
-    private void initialize()
+    private boolean initialize() {
+        try {
+            if (!isInitialized() && !isInitializing()) {
+                unloadTinyMce(elementId); // clean up everything before initializing
+                initTinyMce(elementId, options.getJavaScriptObject());
+                setInitializing(true); // set this after since the above call is asynchronous. We don't want it to be true and an exception to be thrown
+                
+                // Even though this entry was set in the constructor, it could have been unset
+                // in the unload function. We ensure that we have a valid reference while this
+                // editor is initialized
+                activeEditors.put(elementId, this);
+                return true;
+            }
+        } catch (JavaScriptException e) {
+            GWT.log("Unable to initialize the TinyMCE editor.", e);
+        }
+        return false;
+    }
+    
+    private boolean uninitialize() {
+        try {
+            if (isInitialized()) {
+                unloadTinyMce(elementId);            
+                setInitialized(false);
+                setInitializing(false);
+                
+                // Clear the entry in activeEditors so that we don't hold the memory if it needs to be cleaned up.
+                activeEditors.put(elementId, null);
+                return true;
+            }                
+        } catch (JavaScriptException e) {
+            GWT.log("Unable to uninitialize the TinyMCE editor.", e);
+        }
+        return false;        
+    }
+    
+    private void runPendingCommand()
     {
         if (!libraryLoaded) {
             // Only perform operations specific to TinyMCE if the library was successfully loaded
             return;
         }
-        try {
-            if (!initialized && !initializationStack.isEmpty()) {
-                unloadTinyMce(elementId); // clean up everything before initializing
-                initTinyMce(elementId, options.getJavaScriptObject());
-                initialized = true;
-                initializationStack.clear();
-                // Even though this entry was set in the constructor, it could have been unset
-                // in the unload function. We ensure that we have a valid reference while this
-                // editor is initialized
-                activeEditors.put(elementId, this);
+        
+        if (pendingCommands.isEmpty()) {
+            return;
+        }
+        
+        Integer pendingCommand = pendingCommands.get(0);
+        while (pendingCommand != null) {
+            if (pendingCommand == PENDING_COMMAND_LOAD && initialize()) {
+                pendingCommands.remove(0);
+            } else if (pendingCommand == PENDING_COMMAND_UNLOAD && uninitialize()) {
+                pendingCommands.remove(0);
+            } else if (pendingCommand == PENDING_COMMAND_SELECT_ALL) {
+                selectAll();
+                pendingCommands.remove(0);
+            } else if (pendingCommand == PENDING_COMMAND_SET_HTML) {
+                setHTML(pendingSetHtmlText);
+                pendingSetHtmlText = null;
+                pendingCommands.remove(0);
+            } else if (pendingCommand == PENDING_COMMAND_SET_FOCUS) {
+                setFocus(true);
+                pendingCommands.remove(0);
             }
-        } catch (JavaScriptException e) {
-            initialized = false;
-            GWT.log("Unable to initialize the TinyMCE editor.", e);
+            pendingCommand = pendingCommands.isEmpty() ? null : pendingCommands.get(0);
         }
     }
 
@@ -265,7 +362,8 @@ public class HFRichTextEditor extends TextArea {
         if (libraryVersion == TINYMCE_VERSION_4) {
             scriptUrl = GWT.getModuleBaseURL() + "tinymce4/tinymce.min.js";
         } else if (libraryVersion == TINYMCE_VERSION_3) {
-            scriptUrl = GWT.getModuleBaseURL() + "tinymce3/tiny_mce.js";
+//            scriptUrl = GWT.getModuleBaseURL() + "tinymce3/tiny_mce.js";
+            return false; // Security Audit found an issue with using eval. Removing from code base for now. 4.20.2015
         } else {
             // No such version allowed.
             return false;
@@ -306,17 +404,22 @@ public class HFRichTextEditor extends TextArea {
                 HFRichTextEditor editorInstance = getActiveEditor(elementIdFinal);
                 if (editorInstance != null) {
                     editorInstance.setControlTabIndex(elementIdFinal); // set up the tabIndex that comes from the hidden textarea (if it exists)
+                    JSONValue pxWidth = editorInstance.getOptions().get("width");
+                    if (pxWidth == null) {
+                        pxWidth = new JSONNumber(DEFAULT_WIDTH);
+                    }
+                    JSONValue pxHeight = editorInstance.getOptions().get("height");
+                    if (pxHeight == null) {
+                        pxHeight = new JSONNumber(DEFAULT_HEIGHT);
+                    }
+                    editorInstance.setControlSize(elementIdFinal, pxWidth, pxHeight);
+                    
+                    editorInstance.setInitialized(true);
+                    editorInstance.setInitializing(false);
+                    // If there were any pending unload commands, we run them here.
+                    editorInstance.runPendingCommand();
                 }
                 
-                JSONValue pxWidth = editorInstance.getOptions().get("width");
-                if (pxWidth == null) {
-                    pxWidth = new JSONNumber(DEFAULT_WIDTH);
-                }
-                JSONValue pxHeight = editorInstance.getOptions().get("height");
-                if (pxHeight == null) {
-                    pxHeight = new JSONNumber(DEFAULT_HEIGHT);
-                }
-                editorInstance.setControlSize(elementIdFinal, pxWidth, pxHeight);
             }
         });        
         
@@ -467,7 +570,12 @@ public class HFRichTextEditor extends TextArea {
     
     public void setHTML(SafeHtml html) {
         String text = html == null ? null: html.asString();
-        if (libraryLoaded && initialized) {
+        if (libraryLoaded && (isInitialized() || isInitializing())) {
+            if (isInitializing()) {
+                pendingSetHtmlText = html;
+                addPendingSetHtml();
+                return;
+            }
             try {
                 setContent(elementId, text);
             } catch (JavaScriptException e) {
@@ -500,6 +608,13 @@ public class HFRichTextEditor extends TextArea {
     
     @Override
     public void selectAll() {
+        if (isInitializing()) {
+            addPendingSelectAll();
+        } else if (!isInitialized()) {
+            // It's not even initialized. We don't do anything.
+            return;
+        }
+        // If it's properly initialized, then we do the select all.
         selectAllContent(elementId);
     }
     
@@ -607,15 +722,29 @@ public class HFRichTextEditor extends TextArea {
     }    
     
     public void setFocus(boolean focused) {
-        if (!focused || !libraryLoaded || !initialized) {
+        if (!focused) {
             super.setFocus(focused); // nothing we can do to unset focus. Let GWT handle it.
             return;
         }
         
         try {
-            setControlFocus(elementId);
-        } catch (JavaScriptException e) {
-            GWT.log("Unable to set the focus on the TinyMCE editor.", e);
+            // Only pass along the focus command 
+            if (libraryLoaded && (isInitialized() || isInitializing())) {
+                if (isInitializing()) {
+                    if (focused) {
+                        addPendingSetFocus();
+                    }
+                    return;
+                }
+                try {
+                    setControlFocus(elementId);
+                } catch (JavaScriptException e) {
+                    GWT.log("Unable to set the focus on the TinyMCE editor.", e);
+                }
+                return;
+            } 
+        } finally {
+            super.setFocus(focused);
         }
     }
     
@@ -671,7 +800,32 @@ public class HFRichTextEditor extends TextArea {
         }
     }-*/;
 
+    @Override
+    public void setVisible(boolean visible) {
+        super.setVisible(visible);
+        if (visible) {            
+            // Call initialize in case it wasn't previously initialized because the widget was hidden.
+            initialize();
+        }
+    }
+    
     public JSONObject getOptions() {
         return options;
+    }
+
+    public boolean isInitialized() {
+        return initialized;
+    }
+
+    public void setInitialized(boolean initialized) {
+        this.initialized = initialized;
+    }
+
+    public boolean isInitializing() {
+        return initializing;
+    }
+
+    public void setInitializing(boolean initializing) {
+        this.initializing = initializing;
     }    
 }

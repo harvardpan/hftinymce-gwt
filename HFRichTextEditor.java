@@ -16,9 +16,15 @@ import com.google.gwt.core.client.GWT;
 import com.google.gwt.dom.client.NativeEvent;
 import com.google.gwt.event.dom.client.BlurEvent;
 import com.google.gwt.event.dom.client.BlurHandler;
+import com.google.gwt.event.dom.client.ClickEvent;
+import com.google.gwt.event.dom.client.ClickHandler;
 import com.google.gwt.event.dom.client.DomEvent;
 import com.google.gwt.event.dom.client.FocusEvent;
 import com.google.gwt.event.dom.client.FocusHandler;
+import com.google.gwt.event.dom.client.KeyDownEvent;
+import com.google.gwt.event.dom.client.KeyDownHandler;
+import com.google.gwt.event.dom.client.MouseUpEvent;
+import com.google.gwt.event.dom.client.MouseUpHandler;
 import com.google.gwt.json.client.JSONBoolean;
 import com.google.gwt.json.client.JSONNumber;
 import com.google.gwt.json.client.JSONObject;
@@ -72,7 +78,7 @@ public class HFRichTextEditor extends TextArea {
         // NOTE: Do NOT use GWT's debug id scheme. This includes UIObject.ensureDebugId and the debugId property of the UI Binder.
         //       Doing so will prevent the ID from working and this widget from being recognized properly.
         this.elementId = generateUniqueName(elementId);
-        activeEditors.put(this.elementId.trim().toLowerCase(), this);
+        activeEditors.put(this.elementId, this);
         getElement().setId(this.elementId);
         getElement().addClassName(this.elementId);
 
@@ -100,8 +106,31 @@ public class HFRichTextEditor extends TextArea {
                 focused = false;
             }
         });
+        
+        final HFRichTextEditor me = this;
+        addMouseUpHandler(new MouseUpHandler() {
+            @Override
+            public void onMouseUp(MouseUpEvent event) {
+                setBookmarkPosition(me.elementId);
+            }
+        });
+        addClickHandler(new ClickHandler() {
+            @Override
+            public void onClick(ClickEvent event) {
+                setTextCursor(false);
+                restoreBookmarkPosition(me.elementId);
+            }
+        });
+        
+        addKeyDownHandler(new KeyDownHandler() {
+            @Override
+            public void onKeyDown(KeyDownEvent event) {
+                setBookmarkPosition(me.elementId);
+            }            
+        });
     }
 
+    
     public HFRichTextEditor(String elementId)
     {
         this(elementId, null);
@@ -140,7 +169,7 @@ public class HFRichTextEditor extends TextArea {
             String testKey = usedNameKey + Integer.toString(counter);
             testKey = testKey.trim().toLowerCase();
             if (!activeEditors.keySet().contains(testKey)) {
-                return id.concat(Integer.toString(counter));
+                return testKey;
             }
             ++counter;
         }
@@ -194,6 +223,8 @@ public class HFRichTextEditor extends TextArea {
         }
         
         if (!pendingCommands.contains(PENDING_COMMAND_LOAD)) {
+            // Everything that is pending before no longer matters if we're adding a load.
+            pendingCommands.clear();
             pendingCommands.add(PENDING_COMMAND_LOAD);
         }
     }
@@ -235,9 +266,6 @@ public class HFRichTextEditor extends TextArea {
         super.onLoad();
         // Delay the initialization of the TinyMCE editor until after the current browser loop.
         // This will avoid issues where there are multiple loads and unloads.
-        if (!isVisible()) {
-            return;
-        }
         addPendingLoad();
         Scheduler.get().scheduleDeferred(new ScheduledCommand() {
             @Override
@@ -288,6 +316,7 @@ public class HFRichTextEditor extends TextArea {
                 
                 // Clear the entry in activeEditors so that we don't hold the memory if it needs to be cleaned up.
                 activeEditors.put(elementId, null);
+                activeEditors.remove(elementId);
                 return true;
             }                
         } catch (JavaScriptException e) {
@@ -309,21 +338,23 @@ public class HFRichTextEditor extends TextArea {
         
         Integer pendingCommand = pendingCommands.get(0);
         while (pendingCommand != null) {
-            if (pendingCommand == PENDING_COMMAND_LOAD && initialize()) {
-                pendingCommands.remove(0);
-            } else if (pendingCommand == PENDING_COMMAND_UNLOAD && uninitialize()) {
-                pendingCommands.remove(0);
+            if (pendingCommand == PENDING_COMMAND_LOAD) {
+                if (initialize()) {
+                    break; // we break because a load is asynchronous. We can't process any of the other commands until later.
+                }
+            } else if (pendingCommand == PENDING_COMMAND_UNLOAD) {
+                uninitialize();
             } else if (pendingCommand == PENDING_COMMAND_SELECT_ALL) {
                 selectAll();
-                pendingCommands.remove(0);
             } else if (pendingCommand == PENDING_COMMAND_SET_HTML) {
                 setHTML(pendingSetHtmlText);
                 pendingSetHtmlText = null;
-                pendingCommands.remove(0);
             } else if (pendingCommand == PENDING_COMMAND_SET_FOCUS) {
-                setFocus(true);
-                pendingCommands.remove(0);
+                if (focused) {
+                    setFocus(true);
+                }
             }
+            pendingCommands.remove(0);
             pendingCommand = pendingCommands.isEmpty() ? null : pendingCommands.get(0);
         }
     }
@@ -349,12 +380,19 @@ public class HFRichTextEditor extends TextArea {
             if (myEditor == null) {
                 continue;
             }
+            delete myEditor.updatedSelectionBookmark;
+            myEditor.updatedSelectionBookmark = null;
             myEditor.remove();
             if (myEditor == null) {
                 continue;
             }
             myEditor.destroy();
+            myEditor = null;
         }
+        // Clear the array by setting its length to 0.
+        editorsToDelete.length = 0;
+        // Null out the reference altogether
+        editorsToDelete = null;
     }-*/;
     
     public static boolean loadLibrary() {
@@ -606,6 +644,24 @@ public class HFRichTextEditor extends TextArea {
         }
     }-*/;
     
+    private native void setBookmarkPosition(String elementId) 
+    /*-{
+        var myEditor = $wnd.tinymce.get(elementId);
+        if (myEditor == null) {                
+           return;
+        }
+        myEditor.updatedSelectionBookmark = myEditor.selection.getBookmark(1);
+    }-*/;
+    
+    private native void restoreBookmarkPosition(String elementId) 
+    /*-{
+        var myEditor = $wnd.tinymce.get(elementId);
+        if (myEditor == null) {                
+           return;
+        }
+        myEditor.updatedSelectionBookmark && myEditor.selection.moveToBookmark(myEditor.updatedSelectionBookmark);         
+    }-*/;
+
     @Override
     public void selectAll() {
         if (isInitializing()) {
@@ -623,6 +679,30 @@ public class HFRichTextEditor extends TextArea {
         var myEditor = $wnd.tinymce.get(elementId);
         if (myEditor != null) {                
             myEditor.selection.select(myEditor.getBody(), true);
+        }
+    }-*/;
+
+    /**
+     * Puts the text cursor at the beginning or end of the body text.
+     * 
+     * @param atBeginning true if the cursor should be set at the beginning, false if at the end.
+     */
+    public void setTextCursor(boolean atBeginning) {
+        if (!isInitialized()) {
+            // It's not even initialized. We don't do anything.
+            return;
+        }
+        // If it's properly initialized, we first select all, then collapse the selection
+        // to either the beginning or the end.
+        selectAllContent(elementId);
+        collapseSelection(elementId, atBeginning);
+    }
+
+    private native void collapseSelection(String elementId, boolean atBeginning) 
+    /*-{
+        var myEditor = $wnd.tinymce.get(elementId);
+        if (myEditor != null) {                
+            myEditor.selection.collapse(atBeginning);
         }
     }-*/;
     
@@ -731,9 +811,12 @@ public class HFRichTextEditor extends TextArea {
             // Only pass along the focus command 
             if (libraryLoaded && (isInitialized() || isInitializing())) {
                 if (isInitializing()) {
-                    if (focused) {
-                        addPendingSetFocus();
-                    }
+                    // Setting a pending focus actually messes up the final focused element.
+                    // This is because the async call always returns last, so any calls to setFocus
+                    // for any other element essentially get ignored.
+//                    if (focused) {
+//                        addPendingSetFocus();
+//                    }
                     return;
                 }
                 try {

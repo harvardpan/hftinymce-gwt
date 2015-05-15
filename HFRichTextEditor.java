@@ -67,7 +67,7 @@ public class HFRichTextEditor extends TextArea {
     private String elementId;
     private boolean focused;
     private SafeHtml pendingSetHtmlText = null;
-    
+    private static int numInitialized = 1; // start the count at "1"
     public HFRichTextEditor() {
         this(DEFAULT_ELEMENT_ID);
     }
@@ -78,6 +78,7 @@ public class HFRichTextEditor extends TextArea {
         // NOTE: Do NOT use GWT's debug id scheme. This includes UIObject.ensureDebugId and the debugId property of the UI Binder.
         //       Doing so will prevent the ID from working and this widget from being recognized properly.
         this.elementId = generateUniqueName(elementId);
+        ++numInitialized;
         activeEditors.put(this.elementId, this);
         getElement().setId(this.elementId);
         getElement().addClassName(this.elementId);
@@ -164,14 +165,13 @@ public class HFRichTextEditor extends TextArea {
         }
         
         String usedNameKey = id.trim().toLowerCase();
-        int counter = 1;
         while (true) {
-            String testKey = usedNameKey + Integer.toString(counter);
+            String testKey = usedNameKey + Integer.toString(numInitialized);
             testKey = testKey.trim().toLowerCase();
             if (!activeEditors.keySet().contains(testKey)) {
                 return testKey;
             }
-            ++counter;
+            ++numInitialized;
         }
     }
     

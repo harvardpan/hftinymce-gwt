@@ -277,14 +277,18 @@ public class HFRichTextEditor extends TextArea {
 
     @Override
     protected void onUnload() {
+        boolean deferUnloading = false;
         try {
             if (!uninitialize()) {
                 addPendingUnload();
+                deferUnloading = true;
             }
         } catch (JavaScriptException e) {
             GWT.log("Unable to clean up TinyMCE editor.", e);
         } finally {
-            super.onUnload();
+            if (!deferUnloading) {
+                super.onUnload();
+            }
         }
     }
     
@@ -338,24 +342,30 @@ public class HFRichTextEditor extends TextArea {
         
         Integer pendingCommand = pendingCommands.get(0);
         while (pendingCommand != null) {
-            if (pendingCommand == PENDING_COMMAND_LOAD) {
-                if (initialize()) {
-                    break; // we break because a load is asynchronous. We can't process any of the other commands until later.
+            try {
+                if (pendingCommand == PENDING_COMMAND_LOAD) {
+                    if (initialize()) {
+                        break; // we break because a load is asynchronous. We can't process any of the other commands until later.
+                    }
+                } else if (pendingCommand == PENDING_COMMAND_UNLOAD) {
+                    if (uninitialize()) {
+                        // This is a deferred onUnload call.
+                        super.onUnload();
+                    }
+                } else if (pendingCommand == PENDING_COMMAND_SELECT_ALL) {
+                    selectAll();
+                } else if (pendingCommand == PENDING_COMMAND_SET_HTML) {
+                    setHTML(pendingSetHtmlText);
+                    pendingSetHtmlText = null;
+                } else if (pendingCommand == PENDING_COMMAND_SET_FOCUS) {
+                    if (focused) {
+                        setFocus(true);
+                    }
                 }
-            } else if (pendingCommand == PENDING_COMMAND_UNLOAD) {
-                uninitialize();
-            } else if (pendingCommand == PENDING_COMMAND_SELECT_ALL) {
-                selectAll();
-            } else if (pendingCommand == PENDING_COMMAND_SET_HTML) {
-                setHTML(pendingSetHtmlText);
-                pendingSetHtmlText = null;
-            } else if (pendingCommand == PENDING_COMMAND_SET_FOCUS) {
-                if (focused) {
-                    setFocus(true);
-                }
+            } finally {
+                pendingCommands.remove(0);
+                pendingCommand = pendingCommands.isEmpty() ? null : pendingCommands.get(0);
             }
-            pendingCommands.remove(0);
-            pendingCommand = pendingCommands.isEmpty() ? null : pendingCommands.get(0);
         }
     }
 
@@ -454,13 +464,16 @@ public class HFRichTextEditor extends TextArea {
                     
                     editorInstance.setInitialized(true);
                     editorInstance.setInitializing(false);
+                    // Set it to visible if the parent is visible
+                    if (editorInstance.getParent() != null && editorInstance.getParent().isVisible()) {
+                        editorInstance.showEditor(editorInstance.elementId, true);
+                    }
+                    
                     // If there were any pending unload commands, we run them here.
                     editorInstance.runPendingCommand();
                 }
-                
             }
-        });        
-        
+        });
     }
 
     /**
@@ -883,6 +896,18 @@ public class HFRichTextEditor extends TextArea {
         }
     }-*/;
 
+    private native void showEditor(String elementId, boolean visible) 
+    /*-{
+        var myEditor = $wnd.tinymce.get(elementId);
+        if (myEditor != null) {
+            if (visible) {
+                myEditor.show();
+            } else {
+                myEditor.hide();
+            }
+        }        
+    }-*/;
+    
     @Override
     public void setVisible(boolean visible) {
         super.setVisible(visible);
@@ -890,6 +915,7 @@ public class HFRichTextEditor extends TextArea {
             // Call initialize in case it wasn't previously initialized because the widget was hidden.
             initialize();
         }
+        showEditor(elementId, visible);
     }
     
     public JSONObject getOptions() {

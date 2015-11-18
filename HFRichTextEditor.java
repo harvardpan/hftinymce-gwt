@@ -32,6 +32,7 @@ import com.google.gwt.json.client.JSONString;
 import com.google.gwt.json.client.JSONValue;
 import com.google.gwt.safehtml.shared.SafeHtml;
 import com.google.gwt.safehtml.shared.SafeHtmlUtils;
+import com.google.gwt.user.client.Timer;
 import com.google.gwt.user.client.Window;
 import com.google.gwt.user.client.ui.TextArea;
 
@@ -68,6 +69,8 @@ public class HFRichTextEditor extends TextArea {
     private boolean focused;
     private SafeHtml pendingSetHtmlText = null;
     private static int numInitialized = 1; // start the count at "1"
+    private Timer initializationTimeoutTimer = null;
+    
     public HFRichTextEditor() {
         this(DEFAULT_ELEMENT_ID);
     }
@@ -118,7 +121,6 @@ public class HFRichTextEditor extends TextArea {
         addClickHandler(new ClickHandler() {
             @Override
             public void onClick(ClickEvent event) {
-                setTextCursor(false);
                 restoreBookmarkPosition(me.elementId);
             }
         });
@@ -214,50 +216,28 @@ public class HFRichTextEditor extends TextArea {
         }
     }
 
+    private void addPendingCommand(int command) {
+        pendingCommands.add(command);
+    }
+    
     private void addPendingLoad() {
-        if (!pendingCommands.isEmpty()
-                && pendingCommands.contains(PENDING_COMMAND_UNLOAD)) {
-            // A load and unload paired together is a no-op
-            pendingCommands.remove(Integer.valueOf(PENDING_COMMAND_UNLOAD));
-            return;
-        }
-        
-        if (!pendingCommands.contains(PENDING_COMMAND_LOAD)) {
-            // Everything that is pending before no longer matters if we're adding a load.
-            pendingCommands.clear();
-            pendingCommands.add(PENDING_COMMAND_LOAD);
-        }
+        addPendingCommand(PENDING_COMMAND_LOAD);
     }
     
     private void addPendingUnload() {
-        if (!pendingCommands.isEmpty()
-                && pendingCommands.contains(PENDING_COMMAND_LOAD)) {
-            // A load and unload paired together is a no-op
-            pendingCommands.remove(Integer.valueOf(PENDING_COMMAND_LOAD));
-            return;
-        }
-        
-        if (!pendingCommands.contains(PENDING_COMMAND_UNLOAD)) {
-            pendingCommands.add(PENDING_COMMAND_UNLOAD);
-        }
+        addPendingCommand(PENDING_COMMAND_UNLOAD);
     }
 
     private void addPendingSelectAll() {
-        if (!pendingCommands.contains(PENDING_COMMAND_SELECT_ALL)) {
-            pendingCommands.add(PENDING_COMMAND_SELECT_ALL);
-        }
+        addPendingCommand(PENDING_COMMAND_SELECT_ALL);        
     }
 
     private void addPendingSetHtml() {
-        if (!pendingCommands.contains(PENDING_COMMAND_SET_HTML)) {
-            pendingCommands.add(PENDING_COMMAND_SET_HTML);
-        }
+        addPendingCommand(PENDING_COMMAND_SET_HTML);
     }
 
     private void addPendingSetFocus() {
-        if (!pendingCommands.contains(PENDING_COMMAND_SET_FOCUS)) {
-            pendingCommands.add(PENDING_COMMAND_SET_FOCUS);
-        }
+        addPendingCommand(PENDING_COMMAND_SET_FOCUS);
     }
     
     @Override
@@ -272,7 +252,7 @@ public class HFRichTextEditor extends TextArea {
             public void execute() {
                 runPendingCommand();
             }
-        });        
+        });
     }
 
     @Override
@@ -292,10 +272,28 @@ public class HFRichTextEditor extends TextArea {
         }
     }
     
+    private Timer getInitializationTimeoutTimer() {
+        if (initializationTimeoutTimer == null) {
+            initializationTimeoutTimer = new Timer() {
+                @Override
+                public void run() {
+                    setInitialized(false);
+                    setInitializing(false);
+                    
+                    // Clear the entry in activeEditors so that we don't hold the memory if it needs to be cleaned up.
+                    activeEditors.put(elementId, null);
+                    activeEditors.remove(elementId);
+                    
+                    // Run the pending commands to remove all the irrelevant ones
+                    runPendingCommand();
+                }
+            };
+        }
+        return initializationTimeoutTimer;
+    }
     private boolean initialize() {
         try {
             if (!isInitialized() && !isInitializing()) {
-                unloadTinyMce(elementId); // clean up everything before initializing
                 initTinyMce(elementId, options.getJavaScriptObject());
                 setInitializing(true); // set this after since the above call is asynchronous. We don't want it to be true and an exception to be thrown
                 
@@ -303,6 +301,7 @@ public class HFRichTextEditor extends TextArea {
                 // in the unload function. We ensure that we have a valid reference while this
                 // editor is initialized
                 activeEditors.put(elementId, this);
+                getInitializationTimeoutTimer().schedule(1000); // give TinyMCE 1 second to initialize the editor
                 return true;
             }
         } catch (JavaScriptException e) {
@@ -312,20 +311,21 @@ public class HFRichTextEditor extends TextArea {
     }
     
     private boolean uninitialize() {
-        try {
-            if (isInitialized()) {
+         if (isInitialized()) {
+            try {
                 unloadTinyMce(elementId);            
+            } catch (JavaScriptException e) {
+                GWT.log("Unable to uninitialize the TinyMCE editor.", e);
+            } finally {
                 setInitialized(false);
                 setInitializing(false);
                 
                 // Clear the entry in activeEditors so that we don't hold the memory if it needs to be cleaned up.
                 activeEditors.put(elementId, null);
                 activeEditors.remove(elementId);
-                return true;
-            }                
-        } catch (JavaScriptException e) {
-            GWT.log("Unable to uninitialize the TinyMCE editor.", e);
-        }
+            }
+            return true;
+        }                
         return false;        
     }
     
@@ -333,6 +333,10 @@ public class HFRichTextEditor extends TextArea {
     {
         if (!libraryLoaded) {
             // Only perform operations specific to TinyMCE if the library was successfully loaded
+            return;
+        }
+        
+        if (isInitializing()) {
             return;
         }
         
@@ -344,14 +348,21 @@ public class HFRichTextEditor extends TextArea {
         while (pendingCommand != null) {
             try {
                 if (pendingCommand == PENDING_COMMAND_LOAD) {
-                    if (initialize()) {
-                        break; // we break because a load is asynchronous. We can't process any of the other commands until later.
+                    if (!initialize()) {
+                        // Need to add the loading command back if it was unsuccessful.
+                        pendingCommands.add(0, PENDING_COMMAND_LOAD);
                     }
-                } else if (pendingCommand == PENDING_COMMAND_UNLOAD) {
-                    if (uninitialize()) {
-                        // This is a deferred onUnload call.
-                        super.onUnload();
-                    }
+                    break; // we break because a load is asynchronous. We can't process any of the other commands until later.
+                }
+                if (!isInitialized() && !isInitializing()) {
+                    // If we're not initializing or already initialized, then all other commands (other than LOAD) are irrelevant.
+                    // We "continue" (but don't try and execute) to remove them from the pending queue.
+                    continue;
+                }
+                if (pendingCommand == PENDING_COMMAND_UNLOAD) {
+                    // This is a deferred onUnload call.
+                    uninitialize();
+                    super.onUnload();
                 } else if (pendingCommand == PENDING_COMMAND_SELECT_ALL) {
                     selectAll();
                 } else if (pendingCommand == PENDING_COMMAND_SET_HTML) {
@@ -363,8 +374,11 @@ public class HFRichTextEditor extends TextArea {
                     }
                 }
             } finally {
+                pendingCommand = null;
                 pendingCommands.remove(0);
-                pendingCommand = pendingCommands.isEmpty() ? null : pendingCommands.get(0);
+                if (!pendingCommands.isEmpty()) {
+                    pendingCommand = pendingCommands.get(0);
+                }
             }
         }
     }
@@ -379,10 +393,23 @@ public class HFRichTextEditor extends TextArea {
         var editorsToDelete = [];
         // First collect all the editors to delete. Firefox doesn't like it when we delete in place
         // since it does end up modifying the editors array.
-        for (edId in $wnd.tinymce.editors) {
-            if ($wnd.tinymce.editors[edId].id === elementId) {
-                editorsToDelete.push($wnd.tinymce.editors[edId]);
+        for (var index = 0; index < $wnd.tinymce.editors.length; ++index) {
+            var myEditor = $wnd.tinymce.editors[index];
+            if (!(myEditor.id === elementId)) { // Javascript '===' is the identity operator. both type and value must match to return true.
+                continue;
             }
+            // Check to see if it's already been added.
+            var alreadyAdded = false;
+            for (var deleteIndex = 0; deleteIndex < editorsToDelete.length; ++deleteIndex) {
+                if (editorsToDelete[deleteIndex].id === myEditor.id) { // Javascript '===' is the identity operator. both type and value must match to return true.
+                    alreadyAdded = true;
+                    break;
+                }
+            }
+            if (alreadyAdded) {
+                continue;
+            }
+            editorsToDelete.push(myEditor);
         }
         // Have a second loop to actually delete the editors.
         for (var index = editorsToDelete.length - 1; index >= 0; index--) {
@@ -451,6 +478,7 @@ public class HFRichTextEditor extends TextArea {
             public void execute() {
                 HFRichTextEditor editorInstance = getActiveEditor(elementIdFinal);
                 if (editorInstance != null) {
+                    editorInstance.getInitializationTimeoutTimer().cancel(); // cancel the timer that will de-initialize this editor since we have initialized properly
                     editorInstance.setControlTabIndex(elementIdFinal); // set up the tabIndex that comes from the hidden textarea (if it exists)
                     JSONValue pxWidth = editorInstance.getOptions().get("width");
                     if (pxWidth == null) {
@@ -466,7 +494,7 @@ public class HFRichTextEditor extends TextArea {
                     editorInstance.setInitializing(false);
                     // Set it to visible if the parent is visible
                     if (editorInstance.getParent() != null && editorInstance.getParent().isVisible()) {
-                        editorInstance.showEditor(editorInstance.elementId, true);
+                         editorInstance.showEditor(editorInstance.elementId, true);
                     }
                     
                     // If there were any pending unload commands, we run them here.
